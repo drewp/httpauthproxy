@@ -1,0 +1,91 @@
+#!/usr/bin/env python
+"""
+
+When you make a request like the following:
+   GET /http://user:pass@example.com/secret/launchcode.txt
+
+this web server will proxy the encoded request to a standard request
+with the appropriate http authorization header. This is useful if you
+have a feed reader that can't do http auth, but you want to fetch
+feeds that require it, like a twitter friends timeline.
+
+Note that your password will be especially visible in the first half
+of the request, and slightly masked in the second half of the
+proxying. I don't think this program adds any security holes to a http
+auth request. It will fail on passwords with funny chars in them.
+
+https is not supported; patches welcome.
+
+by drewp@bigasterisk.com
+
+"""
+
+
+from twisted.web import proxy, http
+from twisted.internet import reactor
+from twisted.python import log
+import sys, urlparse, optparse
+
+class AuthRequest(proxy.ProxyRequest):
+    """
+    This is a copy of proxy.ProxyRequest, except a hostname like
+    user:pass@host is turned into the appropriate http headers
+    """
+    def process(self):
+        """
+        our full url is like '/http://user:pass@host/request'
+        """
+        (protocol, host, path, params, query, fragment) = urlparse.urlparse(
+            self.uri[1:])
+        authHeader = None
+        if '@' in host:
+            userPass, host = host.rsplit('@', 1)
+            auth = '%s:%s' % tuple(userPass.split(':', 1))
+            auth = userPass.encode('base64').strip()
+            authHeader = 'Basic %s' % (auth,)
+
+        # mostly from /usr/lib/python2.5/site-packages/twisted/web/proxy.py
+        port = self.ports[protocol]
+        if ':' in host:
+            host, port = host.split(':')
+            port = int(port)
+        rest = urlparse.urlunparse(('', '') + (path, params, query, fragment))
+        if not rest:
+            rest = rest + '/'
+        class_ = self.protocols[protocol]
+        headers = self.getAllHeaders().copy()
+        # except this:
+        headers['host'] = host # host must always be set; existing one is junk
+        # and except this:
+        if authHeader is not None:
+            headers['Authorization'] = authHeader
+        self.content.seek(0, 0)
+        s = self.content.read()
+        clientFactory = class_(self.method, rest, self.clientproto, headers,
+                               s, self)
+        self.reactor.connectTCP(host, port, clientFactory)
+        
+class Proxy(http.HTTPChannel):
+    requestFactory = AuthRequest
+
+class ProxyFactory(http.HTTPFactory):
+    def __init__(self):
+        http.HTTPFactory.__init__(self)
+        self.protocol = Proxy
+
+parser = optparse.OptionParser()
+parser.add_option('-p', '--port',
+                  help='port number for this server',
+                  type='int',
+                  default=8081)
+parser.add_option('-q', '--quiet',
+                  help='suppress logging',
+                  action='store_true')
+opts, args = parser.parse_args()
+
+if not opts.quiet:
+    log.startLogging(sys.stdout)
+
+reactor.listenTCP(opts.port, ProxyFactory())
+reactor.run()
+
